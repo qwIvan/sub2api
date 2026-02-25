@@ -54,6 +54,10 @@ func (s *accountRepoStub) GetByCRSAccountID(ctx context.Context, crsAccountID st
 	panic("unexpected GetByCRSAccountID call")
 }
 
+func (s *accountRepoStub) FindByExtraField(ctx context.Context, key string, value any) ([]Account, error) {
+	panic("unexpected FindByExtraField call")
+}
+
 func (s *accountRepoStub) ListCRSAccountIDs(ctx context.Context) (map[string]int64, error) {
 	panic("unexpected ListCRSAccountIDs call")
 }
@@ -75,7 +79,7 @@ func (s *accountRepoStub) List(ctx context.Context, params pagination.Pagination
 	panic("unexpected List call")
 }
 
-func (s *accountRepoStub) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string) ([]Account, *pagination.PaginationResult, error) {
+func (s *accountRepoStub) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64) ([]Account, *pagination.PaginationResult, error) {
 	panic("unexpected ListWithFilters call")
 }
 
