@@ -47,6 +47,20 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 
+	// Rate limit fields
+	RateLimit5h   float64    `json:"rate_limit_5h"`
+	RateLimit1d   float64    `json:"rate_limit_1d"`
+	RateLimit7d   float64    `json:"rate_limit_7d"`
+	Usage5h       float64    `json:"usage_5h"`
+	Usage1d       float64    `json:"usage_1d"`
+	Usage7d       float64    `json:"usage_7d"`
+	Window5hStart *time.Time `json:"window_5h_start"`
+	Window1dStart *time.Time `json:"window_1d_start"`
+	Window7dStart *time.Time `json:"window_7d_start"`
+	Reset5hAt     *time.Time `json:"reset_5h_at,omitempty"`
+	Reset1dAt     *time.Time `json:"reset_1d_at,omitempty"`
+	Reset7dAt     *time.Time `json:"reset_7d_at,omitempty"`
+
 	User  *User  `json:"user,omitempty"`
 	Group *Group `json:"group,omitempty"`
 }
@@ -85,6 +99,9 @@ type Group struct {
 	// Sora 存储配额
 	SoraStorageQuotaBytes int64 `json:"sora_storage_quota_bytes"`
 
+	// OpenAI Messages 调度开关（用户侧需要此字段判断是否展示 Claude Code 教程）
+	AllowMessagesDispatch bool `json:"allow_messages_dispatch"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -100,6 +117,9 @@ type AdminGroup struct {
 
 	// MCP XML 协议注入（仅 antigravity 平台使用）
 	MCPXMLInject bool `json:"mcp_xml_inject"`
+
+	// OpenAI Messages 调度配置（仅 openai 平台使用）
+	DefaultMappedModel string `json:"default_mapped_model"`
 
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes []string       `json:"supported_model_scopes"`
@@ -120,6 +140,7 @@ type Account struct {
 	Extra              map[string]any `json:"extra"`
 	ProxyID            *int64         `json:"proxy_id"`
 	Concurrency        int            `json:"concurrency"`
+	LoadFactor         *int           `json:"load_factor,omitempty"`
 	Priority           int            `json:"priority"`
 	RateMultiplier     float64        `json:"rate_multiplier"`
 	Status             string         `json:"status"`
@@ -155,9 +176,10 @@ type Account struct {
 
 	// RPM 限制（仅 Anthropic OAuth/SetupToken 账号有效）
 	// 从 extra 字段提取，方便前端显示和编辑
-	BaseRPM         *int    `json:"base_rpm,omitempty"`
-	RPMStrategy     *string `json:"rpm_strategy,omitempty"`
-	RPMStickyBuffer *int    `json:"rpm_sticky_buffer,omitempty"`
+	BaseRPM          *int    `json:"base_rpm,omitempty"`
+	RPMStrategy      *string `json:"rpm_strategy,omitempty"`
+	RPMStickyBuffer  *int    `json:"rpm_sticky_buffer,omitempty"`
+	UserMsgQueueMode *string `json:"user_msg_queue_mode,omitempty"`
 
 	// TLS指纹伪装（仅 Anthropic OAuth/SetupToken 账号有效）
 	// 从 extra 字段提取，方便前端显示和编辑
@@ -172,6 +194,14 @@ type Account struct {
 	// 启用后将所有 cache creation tokens 归入指定的 TTL 类型计费
 	CacheTTLOverrideEnabled *bool   `json:"cache_ttl_override_enabled,omitempty"`
 	CacheTTLOverrideTarget  *string `json:"cache_ttl_override_target,omitempty"`
+
+	// API Key 账号配额限制
+	QuotaLimit       *float64 `json:"quota_limit,omitempty"`
+	QuotaUsed        *float64 `json:"quota_used,omitempty"`
+	QuotaDailyLimit  *float64 `json:"quota_daily_limit,omitempty"`
+	QuotaDailyUsed   *float64 `json:"quota_daily_used,omitempty"`
+	QuotaWeeklyLimit *float64 `json:"quota_weekly_limit,omitempty"`
+	QuotaWeeklyUsed  *float64 `json:"quota_weekly_used,omitempty"`
 
 	Proxy         *Proxy         `json:"proxy,omitempty"`
 	AccountGroups []AccountGroup `json:"account_groups,omitempty"`
@@ -292,6 +322,8 @@ type UsageLog struct {
 	AccountID int64  `json:"account_id"`
 	RequestID string `json:"request_id"`
 	Model     string `json:"model"`
+	// ServiceTier records the OpenAI service tier used for billing, e.g. "priority" / "flex".
+	ServiceTier *string `json:"service_tier,omitempty"`
 	// ReasoningEffort is the request's reasoning effort level (OpenAI Responses API).
 	// nil means not provided / not applicable.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`

@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,6 +22,18 @@ import (
 
 // semverPattern 预编译 semver 格式校验正则
 var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+// menuItemIDPattern validates custom menu item IDs: alphanumeric, hyphens, underscores only.
+var menuItemIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// generateMenuItemID generates a short random hex ID for a custom menu item.
+func generateMenuItemID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate menu item ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // SettingHandler 系统设置处理器
 type SettingHandler struct {
@@ -62,6 +77,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 	response.Success(c, dto.SystemSettings{
 		RegistrationEnabled:                  settings.RegistrationEnabled,
 		EmailVerifyEnabled:                   settings.EmailVerifyEnabled,
+		RegistrationEmailSuffixWhitelist:     settings.RegistrationEmailSuffixWhitelist,
 		PromoCodeEnabled:                     settings.PromoCodeEnabled,
 		PasswordResetEnabled:                 settings.PasswordResetEnabled,
 		InvitationCodeEnabled:                settings.InvitationCodeEnabled,
@@ -92,6 +108,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		PurchaseSubscriptionEnabled:          settings.PurchaseSubscriptionEnabled,
 		PurchaseSubscriptionURL:              settings.PurchaseSubscriptionURL,
 		SoraClientEnabled:                    settings.SoraClientEnabled,
+		CustomMenuItems:                      dto.ParseCustomMenuItems(settings.CustomMenuItems),
 		DefaultConcurrency:                   settings.DefaultConcurrency,
 		DefaultBalance:                       settings.DefaultBalance,
 		DefaultSubscriptions:                 defaultSubscriptions,
@@ -107,18 +124,20 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		OpsQueryModeDefault:                  settings.OpsQueryModeDefault,
 		OpsMetricsIntervalSeconds:            settings.OpsMetricsIntervalSeconds,
 		MinClaudeCodeVersion:                 settings.MinClaudeCodeVersion,
+		AllowUngroupedKeyScheduling:          settings.AllowUngroupedKeyScheduling,
 	})
 }
 
 // UpdateSettingsRequest 更新设置请求
 type UpdateSettingsRequest struct {
 	// 注册设置
-	RegistrationEnabled   bool `json:"registration_enabled"`
-	EmailVerifyEnabled    bool `json:"email_verify_enabled"`
-	PromoCodeEnabled      bool `json:"promo_code_enabled"`
-	PasswordResetEnabled  bool `json:"password_reset_enabled"`
-	InvitationCodeEnabled bool `json:"invitation_code_enabled"`
-	TotpEnabled           bool `json:"totp_enabled"` // TOTP 双因素认证
+	RegistrationEnabled              bool     `json:"registration_enabled"`
+	EmailVerifyEnabled               bool     `json:"email_verify_enabled"`
+	RegistrationEmailSuffixWhitelist []string `json:"registration_email_suffix_whitelist"`
+	PromoCodeEnabled                 bool     `json:"promo_code_enabled"`
+	PasswordResetEnabled             bool     `json:"password_reset_enabled"`
+	InvitationCodeEnabled            bool     `json:"invitation_code_enabled"`
+	TotpEnabled                      bool     `json:"totp_enabled"` // TOTP 双因素认证
 
 	// 邮件服务设置
 	SMTPHost     string `json:"smtp_host"`
@@ -141,17 +160,18 @@ type UpdateSettingsRequest struct {
 	LinuxDoConnectRedirectURL  string `json:"linuxdo_connect_redirect_url"`
 
 	// OEM设置
-	SiteName                    string  `json:"site_name"`
-	SiteLogo                    string  `json:"site_logo"`
-	SiteSubtitle                string  `json:"site_subtitle"`
-	APIBaseURL                  string  `json:"api_base_url"`
-	ContactInfo                 string  `json:"contact_info"`
-	DocURL                      string  `json:"doc_url"`
-	HomeContent                 string  `json:"home_content"`
-	HideCcsImportButton         bool    `json:"hide_ccs_import_button"`
-	PurchaseSubscriptionEnabled *bool   `json:"purchase_subscription_enabled"`
-	PurchaseSubscriptionURL     *string `json:"purchase_subscription_url"`
-	SoraClientEnabled           bool    `json:"sora_client_enabled"`
+	SiteName                    string                `json:"site_name"`
+	SiteLogo                    string                `json:"site_logo"`
+	SiteSubtitle                string                `json:"site_subtitle"`
+	APIBaseURL                  string                `json:"api_base_url"`
+	ContactInfo                 string                `json:"contact_info"`
+	DocURL                      string                `json:"doc_url"`
+	HomeContent                 string                `json:"home_content"`
+	HideCcsImportButton         bool                  `json:"hide_ccs_import_button"`
+	PurchaseSubscriptionEnabled *bool                 `json:"purchase_subscription_enabled"`
+	PurchaseSubscriptionURL     *string               `json:"purchase_subscription_url"`
+	SoraClientEnabled           bool                  `json:"sora_client_enabled"`
+	CustomMenuItems             *[]dto.CustomMenuItem `json:"custom_menu_items"`
 
 	// 默认配置
 	DefaultConcurrency   int                              `json:"default_concurrency"`
@@ -176,6 +196,9 @@ type UpdateSettingsRequest struct {
 	OpsMetricsIntervalSeconds    *int    `json:"ops_metrics_interval_seconds"`
 
 	MinClaudeCodeVersion string `json:"min_claude_code_version"`
+
+	// 分组隔离
+	AllowUngroupedKeyScheduling bool `json:"allow_ungrouped_key_scheduling"`
 }
 
 // UpdateSettings 更新系统设置
@@ -299,6 +322,84 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		}
 	}
 
+	// 自定义菜单项验证
+	const (
+		maxCustomMenuItems    = 20
+		maxMenuItemLabelLen   = 50
+		maxMenuItemURLLen     = 2048
+		maxMenuItemIconSVGLen = 10 * 1024 // 10KB
+		maxMenuItemIDLen      = 32
+	)
+
+	customMenuJSON := previousSettings.CustomMenuItems
+	if req.CustomMenuItems != nil {
+		items := *req.CustomMenuItems
+		if len(items) > maxCustomMenuItems {
+			response.BadRequest(c, "Too many custom menu items (max 20)")
+			return
+		}
+		for i, item := range items {
+			if strings.TrimSpace(item.Label) == "" {
+				response.BadRequest(c, "Custom menu item label is required")
+				return
+			}
+			if len(item.Label) > maxMenuItemLabelLen {
+				response.BadRequest(c, "Custom menu item label is too long (max 50 characters)")
+				return
+			}
+			if strings.TrimSpace(item.URL) == "" {
+				response.BadRequest(c, "Custom menu item URL is required")
+				return
+			}
+			if len(item.URL) > maxMenuItemURLLen {
+				response.BadRequest(c, "Custom menu item URL is too long (max 2048 characters)")
+				return
+			}
+			if err := config.ValidateAbsoluteHTTPURL(strings.TrimSpace(item.URL)); err != nil {
+				response.BadRequest(c, "Custom menu item URL must be an absolute http(s) URL")
+				return
+			}
+			if item.Visibility != "user" && item.Visibility != "admin" {
+				response.BadRequest(c, "Custom menu item visibility must be 'user' or 'admin'")
+				return
+			}
+			if len(item.IconSVG) > maxMenuItemIconSVGLen {
+				response.BadRequest(c, "Custom menu item icon SVG is too large (max 10KB)")
+				return
+			}
+			// Auto-generate ID if missing
+			if strings.TrimSpace(item.ID) == "" {
+				id, err := generateMenuItemID()
+				if err != nil {
+					response.Error(c, http.StatusInternalServerError, "Failed to generate menu item ID")
+					return
+				}
+				items[i].ID = id
+			} else if len(item.ID) > maxMenuItemIDLen {
+				response.BadRequest(c, "Custom menu item ID is too long (max 32 characters)")
+				return
+			} else if !menuItemIDPattern.MatchString(item.ID) {
+				response.BadRequest(c, "Custom menu item ID contains invalid characters (only a-z, A-Z, 0-9, - and _ are allowed)")
+				return
+			}
+		}
+		// ID uniqueness check
+		seen := make(map[string]struct{}, len(items))
+		for _, item := range items {
+			if _, exists := seen[item.ID]; exists {
+				response.BadRequest(c, "Duplicate custom menu item ID: "+item.ID)
+				return
+			}
+			seen[item.ID] = struct{}{}
+		}
+		menuBytes, err := json.Marshal(items)
+		if err != nil {
+			response.BadRequest(c, "Failed to serialize custom menu items")
+			return
+		}
+		customMenuJSON = string(menuBytes)
+	}
+
 	// Ops metrics collector interval validation (seconds).
 	if req.OpsMetricsIntervalSeconds != nil {
 		v := *req.OpsMetricsIntervalSeconds
@@ -327,48 +428,51 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 
 	settings := &service.SystemSettings{
-		RegistrationEnabled:         req.RegistrationEnabled,
-		EmailVerifyEnabled:          req.EmailVerifyEnabled,
-		PromoCodeEnabled:            req.PromoCodeEnabled,
-		PasswordResetEnabled:        req.PasswordResetEnabled,
-		InvitationCodeEnabled:       req.InvitationCodeEnabled,
-		TotpEnabled:                 req.TotpEnabled,
-		SMTPHost:                    req.SMTPHost,
-		SMTPPort:                    req.SMTPPort,
-		SMTPUsername:                req.SMTPUsername,
-		SMTPPassword:                req.SMTPPassword,
-		SMTPFrom:                    req.SMTPFrom,
-		SMTPFromName:                req.SMTPFromName,
-		SMTPUseTLS:                  req.SMTPUseTLS,
-		TurnstileEnabled:            req.TurnstileEnabled,
-		TurnstileSiteKey:            req.TurnstileSiteKey,
-		TurnstileSecretKey:          req.TurnstileSecretKey,
-		LinuxDoConnectEnabled:       req.LinuxDoConnectEnabled,
-		LinuxDoConnectClientID:      req.LinuxDoConnectClientID,
-		LinuxDoConnectClientSecret:  req.LinuxDoConnectClientSecret,
-		LinuxDoConnectRedirectURL:   req.LinuxDoConnectRedirectURL,
-		SiteName:                    req.SiteName,
-		SiteLogo:                    req.SiteLogo,
-		SiteSubtitle:                req.SiteSubtitle,
-		APIBaseURL:                  req.APIBaseURL,
-		ContactInfo:                 req.ContactInfo,
-		DocURL:                      req.DocURL,
-		HomeContent:                 req.HomeContent,
-		HideCcsImportButton:         req.HideCcsImportButton,
-		PurchaseSubscriptionEnabled: purchaseEnabled,
-		PurchaseSubscriptionURL:     purchaseURL,
-		SoraClientEnabled:           req.SoraClientEnabled,
-		DefaultConcurrency:          req.DefaultConcurrency,
-		DefaultBalance:              req.DefaultBalance,
-		DefaultSubscriptions:        defaultSubscriptions,
-		EnableModelFallback:         req.EnableModelFallback,
-		FallbackModelAnthropic:      req.FallbackModelAnthropic,
-		FallbackModelOpenAI:         req.FallbackModelOpenAI,
-		FallbackModelGemini:         req.FallbackModelGemini,
-		FallbackModelAntigravity:    req.FallbackModelAntigravity,
-		EnableIdentityPatch:         req.EnableIdentityPatch,
-		IdentityPatchPrompt:         req.IdentityPatchPrompt,
-		MinClaudeCodeVersion:        req.MinClaudeCodeVersion,
+		RegistrationEnabled:              req.RegistrationEnabled,
+		EmailVerifyEnabled:               req.EmailVerifyEnabled,
+		RegistrationEmailSuffixWhitelist: req.RegistrationEmailSuffixWhitelist,
+		PromoCodeEnabled:                 req.PromoCodeEnabled,
+		PasswordResetEnabled:             req.PasswordResetEnabled,
+		InvitationCodeEnabled:            req.InvitationCodeEnabled,
+		TotpEnabled:                      req.TotpEnabled,
+		SMTPHost:                         req.SMTPHost,
+		SMTPPort:                         req.SMTPPort,
+		SMTPUsername:                     req.SMTPUsername,
+		SMTPPassword:                     req.SMTPPassword,
+		SMTPFrom:                         req.SMTPFrom,
+		SMTPFromName:                     req.SMTPFromName,
+		SMTPUseTLS:                       req.SMTPUseTLS,
+		TurnstileEnabled:                 req.TurnstileEnabled,
+		TurnstileSiteKey:                 req.TurnstileSiteKey,
+		TurnstileSecretKey:               req.TurnstileSecretKey,
+		LinuxDoConnectEnabled:            req.LinuxDoConnectEnabled,
+		LinuxDoConnectClientID:           req.LinuxDoConnectClientID,
+		LinuxDoConnectClientSecret:       req.LinuxDoConnectClientSecret,
+		LinuxDoConnectRedirectURL:        req.LinuxDoConnectRedirectURL,
+		SiteName:                         req.SiteName,
+		SiteLogo:                         req.SiteLogo,
+		SiteSubtitle:                     req.SiteSubtitle,
+		APIBaseURL:                       req.APIBaseURL,
+		ContactInfo:                      req.ContactInfo,
+		DocURL:                           req.DocURL,
+		HomeContent:                      req.HomeContent,
+		HideCcsImportButton:              req.HideCcsImportButton,
+		PurchaseSubscriptionEnabled:      purchaseEnabled,
+		PurchaseSubscriptionURL:          purchaseURL,
+		SoraClientEnabled:                req.SoraClientEnabled,
+		CustomMenuItems:                  customMenuJSON,
+		DefaultConcurrency:               req.DefaultConcurrency,
+		DefaultBalance:                   req.DefaultBalance,
+		DefaultSubscriptions:             defaultSubscriptions,
+		EnableModelFallback:              req.EnableModelFallback,
+		FallbackModelAnthropic:           req.FallbackModelAnthropic,
+		FallbackModelOpenAI:              req.FallbackModelOpenAI,
+		FallbackModelGemini:              req.FallbackModelGemini,
+		FallbackModelAntigravity:         req.FallbackModelAntigravity,
+		EnableIdentityPatch:              req.EnableIdentityPatch,
+		IdentityPatchPrompt:              req.IdentityPatchPrompt,
+		MinClaudeCodeVersion:             req.MinClaudeCodeVersion,
+		AllowUngroupedKeyScheduling:      req.AllowUngroupedKeyScheduling,
 		OpsMonitoringEnabled: func() bool {
 			if req.OpsMonitoringEnabled != nil {
 				return *req.OpsMonitoringEnabled
@@ -419,6 +523,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	response.Success(c, dto.SystemSettings{
 		RegistrationEnabled:                  updatedSettings.RegistrationEnabled,
 		EmailVerifyEnabled:                   updatedSettings.EmailVerifyEnabled,
+		RegistrationEmailSuffixWhitelist:     updatedSettings.RegistrationEmailSuffixWhitelist,
 		PromoCodeEnabled:                     updatedSettings.PromoCodeEnabled,
 		PasswordResetEnabled:                 updatedSettings.PasswordResetEnabled,
 		InvitationCodeEnabled:                updatedSettings.InvitationCodeEnabled,
@@ -449,6 +554,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PurchaseSubscriptionEnabled:          updatedSettings.PurchaseSubscriptionEnabled,
 		PurchaseSubscriptionURL:              updatedSettings.PurchaseSubscriptionURL,
 		SoraClientEnabled:                    updatedSettings.SoraClientEnabled,
+		CustomMenuItems:                      dto.ParseCustomMenuItems(updatedSettings.CustomMenuItems),
 		DefaultConcurrency:                   updatedSettings.DefaultConcurrency,
 		DefaultBalance:                       updatedSettings.DefaultBalance,
 		DefaultSubscriptions:                 updatedDefaultSubscriptions,
@@ -464,6 +570,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		OpsQueryModeDefault:                  updatedSettings.OpsQueryModeDefault,
 		OpsMetricsIntervalSeconds:            updatedSettings.OpsMetricsIntervalSeconds,
 		MinClaudeCodeVersion:                 updatedSettings.MinClaudeCodeVersion,
+		AllowUngroupedKeyScheduling:          updatedSettings.AllowUngroupedKeyScheduling,
 	})
 }
 
@@ -494,6 +601,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	}
 	if before.EmailVerifyEnabled != after.EmailVerifyEnabled {
 		changed = append(changed, "email_verify_enabled")
+	}
+	if !equalStringSlice(before.RegistrationEmailSuffixWhitelist, after.RegistrationEmailSuffixWhitelist) {
+		changed = append(changed, "registration_email_suffix_whitelist")
 	}
 	if before.PasswordResetEnabled != after.PasswordResetEnabled {
 		changed = append(changed, "password_reset_enabled")
@@ -612,6 +722,18 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.MinClaudeCodeVersion != after.MinClaudeCodeVersion {
 		changed = append(changed, "min_claude_code_version")
 	}
+	if before.AllowUngroupedKeyScheduling != after.AllowUngroupedKeyScheduling {
+		changed = append(changed, "allow_ungrouped_key_scheduling")
+	}
+	if before.PurchaseSubscriptionEnabled != after.PurchaseSubscriptionEnabled {
+		changed = append(changed, "purchase_subscription_enabled")
+	}
+	if before.PurchaseSubscriptionURL != after.PurchaseSubscriptionURL {
+		changed = append(changed, "purchase_subscription_url")
+	}
+	if before.CustomMenuItems != after.CustomMenuItems {
+		changed = append(changed, "custom_menu_items")
+	}
 	return changed
 }
 
@@ -630,6 +752,18 @@ func normalizeDefaultSubscriptions(input []dto.DefaultSubscriptionSetting) []dto
 		normalized = append(normalized, item)
 	}
 	return normalized
+}
+
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func equalDefaultSubscriptions(a, b []service.DefaultSubscriptionSetting) bool {
@@ -685,7 +819,7 @@ func (h *SettingHandler) TestSMTPConnection(c *gin.Context) {
 
 	err := h.emailService.TestSMTPConnectionWithConfig(config)
 	if err != nil {
-		response.ErrorFrom(c, err)
+		response.BadRequest(c, "SMTP connection test failed: "+err.Error())
 		return
 	}
 
@@ -771,7 +905,7 @@ func (h *SettingHandler) SendTestEmail(c *gin.Context) {
 `
 
 	if err := h.emailService.SendEmailWithConfig(config, req.Email, subject, body); err != nil {
-		response.ErrorFrom(c, err)
+		response.BadRequest(c, "Failed to send test email: "+err.Error())
 		return
 	}
 
@@ -1212,6 +1346,118 @@ func (h *SettingHandler) TestSoraS3Connection(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"message": "S3 连接成功"})
+}
+
+// GetRectifierSettings 获取请求整流器配置
+// GET /api/v1/admin/settings/rectifier
+func (h *SettingHandler) GetRectifierSettings(c *gin.Context) {
+	settings, err := h.settingService.GetRectifierSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, dto.RectifierSettings{
+		Enabled:                  settings.Enabled,
+		ThinkingSignatureEnabled: settings.ThinkingSignatureEnabled,
+		ThinkingBudgetEnabled:    settings.ThinkingBudgetEnabled,
+	})
+}
+
+// UpdateRectifierSettingsRequest 更新整流器配置请求
+type UpdateRectifierSettingsRequest struct {
+	Enabled                  bool `json:"enabled"`
+	ThinkingSignatureEnabled bool `json:"thinking_signature_enabled"`
+	ThinkingBudgetEnabled    bool `json:"thinking_budget_enabled"`
+}
+
+// UpdateRectifierSettings 更新请求整流器配置
+// PUT /api/v1/admin/settings/rectifier
+func (h *SettingHandler) UpdateRectifierSettings(c *gin.Context) {
+	var req UpdateRectifierSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	settings := &service.RectifierSettings{
+		Enabled:                  req.Enabled,
+		ThinkingSignatureEnabled: req.ThinkingSignatureEnabled,
+		ThinkingBudgetEnabled:    req.ThinkingBudgetEnabled,
+	}
+
+	if err := h.settingService.SetRectifierSettings(c.Request.Context(), settings); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	// 重新获取设置返回
+	updatedSettings, err := h.settingService.GetRectifierSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, dto.RectifierSettings{
+		Enabled:                  updatedSettings.Enabled,
+		ThinkingSignatureEnabled: updatedSettings.ThinkingSignatureEnabled,
+		ThinkingBudgetEnabled:    updatedSettings.ThinkingBudgetEnabled,
+	})
+}
+
+// GetBetaPolicySettings 获取 Beta 策略配置
+// GET /api/v1/admin/settings/beta-policy
+func (h *SettingHandler) GetBetaPolicySettings(c *gin.Context) {
+	settings, err := h.settingService.GetBetaPolicySettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	rules := make([]dto.BetaPolicyRule, len(settings.Rules))
+	for i, r := range settings.Rules {
+		rules[i] = dto.BetaPolicyRule(r)
+	}
+	response.Success(c, dto.BetaPolicySettings{Rules: rules})
+}
+
+// UpdateBetaPolicySettingsRequest 更新 Beta 策略配置请求
+type UpdateBetaPolicySettingsRequest struct {
+	Rules []dto.BetaPolicyRule `json:"rules"`
+}
+
+// UpdateBetaPolicySettings 更新 Beta 策略配置
+// PUT /api/v1/admin/settings/beta-policy
+func (h *SettingHandler) UpdateBetaPolicySettings(c *gin.Context) {
+	var req UpdateBetaPolicySettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	rules := make([]service.BetaPolicyRule, len(req.Rules))
+	for i, r := range req.Rules {
+		rules[i] = service.BetaPolicyRule(r)
+	}
+
+	settings := &service.BetaPolicySettings{Rules: rules}
+	if err := h.settingService.SetBetaPolicySettings(c.Request.Context(), settings); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	// Re-fetch to return updated settings
+	updated, err := h.settingService.GetBetaPolicySettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	outRules := make([]dto.BetaPolicyRule, len(updated.Rules))
+	for i, r := range updated.Rules {
+		outRules[i] = dto.BetaPolicyRule(r)
+	}
+	response.Success(c, dto.BetaPolicySettings{Rules: outRules})
 }
 
 // UpdateStreamTimeoutSettingsRequest 更新流超时配置请求

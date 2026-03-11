@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
@@ -33,7 +34,7 @@ import (
 var sseDataPrefix = regexp.MustCompile(`^data:\s*`)
 
 const (
-	testClaudeAPIURL   = "https://api.anthropic.com/v1/messages"
+	testClaudeAPIURL   = "https://api.anthropic.com/v1/messages?beta=true"
 	chatgptCodexAPIURL = "https://chatgpt.com/backend-api/codex/responses"
 	soraMeAPIURL       = "https://sora.chatgpt.com/backend/me" // Sora 用户信息接口，用于测试连接
 	soraBillingAPIURL  = "https://sora.chatgpt.com/backend/billing/subscriptions"
@@ -179,7 +180,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	}
 
 	if account.Platform == PlatformAntigravity {
-		return s.testAntigravityAccountConnection(c, account, modelID)
+		return s.routeAntigravityTest(c, account, modelID)
 	}
 
 	if account.Platform == PlatformSora {
@@ -238,7 +239,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
-		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages"
+		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages?beta=true"
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
@@ -405,8 +406,27 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if isOAuth && s.accountRepo != nil {
+		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
+			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
+			mergeAccountExtra(account, updates)
+		}
+		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+			if resetAt := codexRateLimitResetAtFromSnapshot(snapshot, time.Now()); resetAt != nil {
+				_ = s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt)
+				account.RateLimitResetAt = resetAt
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if isOAuth && s.accountRepo != nil {
+			if resetAt := (&RateLimitService{}).calculateOpenAI429ResetTime(resp.Header); resetAt != nil {
+				_ = s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt)
+				account.RateLimitResetAt = resetAt
+			}
+		}
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -1176,6 +1196,18 @@ func truncateSoraErrorBody(body []byte, max int) string {
 	return soraerror.TruncateBody(body, max)
 }
 
+// routeAntigravityTest 路由 Antigravity 账号的测试请求。
+// APIKey 类型走原生协议（与 gateway_handler 路由一致），OAuth/Upstream 走 CRS 中转。
+func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Account, modelID string) error {
+	if account.Type == AccountTypeAPIKey {
+		if strings.HasPrefix(modelID, "gemini-") {
+			return s.testGeminiAccountConnection(c, account, modelID)
+		}
+		return s.testClaudeAccountConnection(c, account, modelID)
+	}
+	return s.testAntigravityAccountConnection(c, account, modelID)
+}
+
 // testAntigravityAccountConnection tests an Antigravity account's connection
 // 支持 Claude 和 Gemini 两种协议，使用非流式请求
 func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, account *Account, modelID string) error {
@@ -1559,4 +1591,63 @@ func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) er
 	log.Printf("Account test error: %s", errorMsg)
 	s.sendEvent(c, TestEvent{Type: "error", Error: errorMsg})
 	return fmt.Errorf("%s", errorMsg)
+}
+
+// RunTestBackground executes an account test in-memory (no real HTTP client),
+// capturing SSE output via httptest.NewRecorder, then parses the result.
+func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string) (*ScheduledTestResult, error) {
+	startedAt := time.Now()
+
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	ginCtx.Request = (&http.Request{}).WithContext(ctx)
+
+	testErr := s.TestAccountConnection(ginCtx, accountID, modelID)
+
+	finishedAt := time.Now()
+	body := w.Body.String()
+	responseText, errMsg := parseTestSSEOutput(body)
+
+	status := "success"
+	if testErr != nil || errMsg != "" {
+		status = "failed"
+		if errMsg == "" && testErr != nil {
+			errMsg = testErr.Error()
+		}
+	}
+
+	return &ScheduledTestResult{
+		Status:       status,
+		ResponseText: responseText,
+		ErrorMessage: errMsg,
+		LatencyMs:    finishedAt.Sub(startedAt).Milliseconds(),
+		StartedAt:    startedAt,
+		FinishedAt:   finishedAt,
+	}, nil
+}
+
+// parseTestSSEOutput extracts response text and error message from captured SSE output.
+func parseTestSSEOutput(body string) (responseText, errMsg string) {
+	var texts []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		jsonStr := strings.TrimPrefix(line, "data: ")
+		var event TestEvent
+		if err := json.Unmarshal([]byte(jsonStr), &event); err != nil {
+			continue
+		}
+		switch event.Type {
+		case "content":
+			if event.Text != "" {
+				texts = append(texts, event.Text)
+			}
+		case "error":
+			errMsg = event.Error
+		}
+	}
+	responseText = strings.Join(texts, "")
+	return
 }

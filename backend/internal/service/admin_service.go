@@ -84,6 +84,7 @@ type AdminService interface {
 	DeleteRedeemCode(ctx context.Context, id int64) error
 	BatchDeleteRedeemCodes(ctx context.Context, ids []int64) (int64, error)
 	ExpireRedeemCode(ctx context.Context, id int64) (*RedeemCode, error)
+	ResetAccountQuota(ctx context.Context, id int64) error
 }
 
 // CreateUserInput represents input for creating a new user via admin operations.
@@ -144,6 +145,9 @@ type CreateGroupInput struct {
 	SupportedModelScopes []string
 	// Sora 存储配额
 	SoraStorageQuotaBytes int64
+	// OpenAI Messages 调度配置（仅 openai 平台使用）
+	AllowMessagesDispatch bool
+	DefaultMappedModel    string
 	// 从指定分组复制账号（创建分组后在同一事务内绑定）
 	CopyAccountsFromGroupIDs []int64
 }
@@ -180,6 +184,9 @@ type UpdateGroupInput struct {
 	SupportedModelScopes *[]string
 	// Sora 存储配额
 	SoraStorageQuotaBytes *int64
+	// OpenAI Messages 调度配置（仅 openai 平台使用）
+	AllowMessagesDispatch *bool
+	DefaultMappedModel    *string
 	// 从指定分组复制账号（同步操作：先清空当前分组的账号绑定，再绑定源分组的账号）
 	CopyAccountsFromGroupIDs []int64
 }
@@ -195,6 +202,7 @@ type CreateAccountInput struct {
 	Concurrency        int
 	Priority           int
 	RateMultiplier     *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor         *int
 	GroupIDs           []int64
 	ExpiresAt          *int64
 	AutoPauseOnExpired *bool
@@ -215,6 +223,7 @@ type UpdateAccountInput struct {
 	Concurrency           *int     // 使用指针区分"未提供"和"设置为0"
 	Priority              *int     // 使用指针区分"未提供"和"设置为0"
 	RateMultiplier        *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor            *int
 	Status                string
 	GroupIDs              *[]int64
 	ExpiresAt             *int64
@@ -230,6 +239,7 @@ type BulkUpdateAccountsInput struct {
 	Concurrency    *int
 	Priority       *int
 	RateMultiplier *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor     *int
 	Status         string
 	Schedulable    *bool
 	GroupIDs       *[]int64
@@ -422,6 +432,7 @@ type adminServiceImpl struct {
 	entClient            *dbent.Client // 用于开启数据库事务
 	settingService       *SettingService
 	defaultSubAssigner   DefaultSubscriptionAssigner
+	userSubRepo          UserSubscriptionRepository
 }
 
 type userGroupRateBatchReader interface {
@@ -449,6 +460,7 @@ func NewAdminService(
 	entClient *dbent.Client,
 	settingService *SettingService,
 	defaultSubAssigner DefaultSubscriptionAssigner,
+	userSubRepo UserSubscriptionRepository,
 ) AdminService {
 	return &adminServiceImpl{
 		userRepo:             userRepo,
@@ -466,6 +478,7 @@ func NewAdminService(
 		entClient:            entClient,
 		settingService:       settingService,
 		defaultSubAssigner:   defaultSubAssigner,
+		userSubRepo:          userSubRepo,
 	}
 }
 
@@ -745,7 +758,7 @@ func (s *adminServiceImpl) UpdateUserBalance(ctx context.Context, userID int64, 
 
 func (s *adminServiceImpl) GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int) ([]APIKey, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
-	keys, result, err := s.apiKeyRepo.ListByUserID(ctx, userID, params)
+	keys, result, err := s.apiKeyRepo.ListByUserID(ctx, userID, params, APIKeyListFilters{})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -905,6 +918,8 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		MCPXMLInject:                    mcpXMLInject,
 		SupportedModelScopes:            input.SupportedModelScopes,
 		SoraStorageQuotaBytes:           input.SoraStorageQuotaBytes,
+		AllowMessagesDispatch:           input.AllowMessagesDispatch,
+		DefaultMappedModel:              input.DefaultMappedModel,
 	}
 	if err := s.groupRepo.Create(ctx, group); err != nil {
 		return nil, err
@@ -1118,6 +1133,14 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 		group.SupportedModelScopes = *input.SupportedModelScopes
 	}
 
+	// OpenAI Messages 调度配置
+	if input.AllowMessagesDispatch != nil {
+		group.AllowMessagesDispatch = *input.AllowMessagesDispatch
+	}
+	if input.DefaultMappedModel != nil {
+		group.DefaultMappedModel = *input.DefaultMappedModel
+	}
+
 	if err := s.groupRepo.Update(ctx, group); err != nil {
 		return nil, err
 	}
@@ -1257,9 +1280,17 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		if group.Status != StatusActive {
 			return nil, infraerrors.BadRequest("GROUP_NOT_ACTIVE", "target group is not active")
 		}
-		// 订阅类型分组：不允许通过此 API 直接绑定，需通过订阅管理流程
+		// 订阅类型分组：用户须持有该分组的有效订阅才可绑定
 		if group.IsSubscriptionType() {
-			return nil, infraerrors.BadRequest("SUBSCRIPTION_GROUP_NOT_ALLOWED", "subscription groups must be managed through the subscription workflow")
+			if s.userSubRepo == nil {
+				return nil, infraerrors.InternalServer("SUBSCRIPTION_REPOSITORY_UNAVAILABLE", "subscription repository is not configured")
+			}
+			if _, err := s.userSubRepo.GetActiveByUserIDAndGroupID(ctx, apiKey.UserID, *groupID); err != nil {
+				if errors.Is(err, ErrSubscriptionNotFound) {
+					return nil, infraerrors.BadRequest("SUBSCRIPTION_REQUIRED", "user does not have an active subscription for this group")
+				}
+				return nil, err
+			}
 		}
 
 		gid := *groupID
@@ -1267,7 +1298,7 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		apiKey.Group = group
 
 		// 专属标准分组：使用事务保证「添加分组权限」与「更新 API Key」的原子性
-		if group.IsExclusive {
+		if group.IsExclusive && !group.IsSubscriptionType() {
 			opCtx := ctx
 			var tx *dbent.Tx
 			if s.entClient == nil {
@@ -1328,6 +1359,10 @@ func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int,
 	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID)
 	if err != nil {
 		return nil, 0, err
+	}
+	now := time.Now()
+	for i := range accounts {
+		syncOpenAICodexRateLimitFromExtra(ctx, s.accountRepo, &accounts[i], now)
 	}
 	return accounts, result.Total, nil
 }
@@ -1413,6 +1448,12 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 		account.RateMultiplier = input.RateMultiplier
 	}
+	if input.LoadFactor != nil && *input.LoadFactor > 0 {
+		if *input.LoadFactor > 10000 {
+			return nil, errors.New("load_factor must be <= 10000")
+		}
+		account.LoadFactor = input.LoadFactor
+	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
 	}
@@ -1458,6 +1499,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		account.Credentials = input.Credentials
 	}
 	if len(input.Extra) > 0 {
+		// 保留配额用量字段，防止编辑账号时意外重置
+		for _, key := range []string{"quota_used", "quota_daily_used", "quota_daily_start", "quota_weekly_used", "quota_weekly_start"} {
+			if v, ok := account.Extra[key]; ok {
+				input.Extra[key] = v
+			}
+		}
 		account.Extra = input.Extra
 	}
 	if input.ProxyID != nil {
@@ -1482,6 +1529,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, errors.New("rate_multiplier must be >= 0")
 		}
 		account.RateMultiplier = input.RateMultiplier
+	}
+	if input.LoadFactor != nil {
+		if *input.LoadFactor <= 0 {
+			account.LoadFactor = nil // 0 或负数表示清除
+		} else if *input.LoadFactor > 10000 {
+			return nil, errors.New("load_factor must be <= 10000")
+		} else {
+			account.LoadFactor = input.LoadFactor
+		}
 	}
 	if input.Status != "" {
 		account.Status = input.Status
@@ -1616,6 +1672,15 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	if input.RateMultiplier != nil {
 		repoUpdates.RateMultiplier = input.RateMultiplier
 	}
+	if input.LoadFactor != nil {
+		if *input.LoadFactor <= 0 {
+			repoUpdates.LoadFactor = nil // 0 或负数表示清除
+		} else if *input.LoadFactor > 10000 {
+			return nil, errors.New("load_factor must be <= 10000")
+		} else {
+			repoUpdates.LoadFactor = input.LoadFactor
+		}
+	}
 	if input.Status != "" {
 		repoUpdates.Status = &input.Status
 	}
@@ -1669,16 +1734,10 @@ func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int
 }
 
 func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Account, error) {
-	account, err := s.accountRepo.GetByID(ctx, id)
-	if err != nil {
+	if err := s.accountRepo.ClearError(ctx, id); err != nil {
 		return nil, err
 	}
-	account.Status = StatusActive
-	account.ErrorMessage = ""
-	if err := s.accountRepo.Update(ctx, account); err != nil {
-		return nil, err
-	}
-	return account, nil
+	return s.accountRepo.GetByID(ctx, id)
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
@@ -2438,4 +2497,8 @@ type MixedChannelError struct {
 func (e *MixedChannelError) Error() string {
 	return fmt.Sprintf("mixed_channel_warning: Group '%s' contains both %s and %s accounts. Using mixed channels in the same context may cause thinking block signature validation issues, which will fallback to non-thinking mode for historical messages.",
 		e.GroupName, e.CurrentPlatform, e.OtherPlatform)
+}
+
+func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) error {
+	return s.accountRepo.ResetQuotaUsed(ctx, id)
 }

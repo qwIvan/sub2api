@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import type { CustomMenuItem } from '@/types'
 
 export interface DefaultSubscriptionSetting {
   group_id: number
@@ -17,6 +18,7 @@ export interface SystemSettings {
   // Registration settings
   registration_enabled: boolean
   email_verify_enabled: boolean
+  registration_email_suffix_whitelist: string[]
   promo_code_enabled: boolean
   password_reset_enabled: boolean
   invitation_code_enabled: boolean
@@ -38,6 +40,7 @@ export interface SystemSettings {
   purchase_subscription_enabled: boolean
   purchase_subscription_url: string
   sora_client_enabled: boolean
+  custom_menu_items: CustomMenuItem[]
   // SMTP settings
   smtp_host: string
   smtp_port: number
@@ -76,11 +79,15 @@ export interface SystemSettings {
 
   // Claude Code version check
   min_claude_code_version: string
+
+  // 分组隔离
+  allow_ungrouped_key_scheduling: boolean
 }
 
 export interface UpdateSettingsRequest {
   registration_enabled?: boolean
   email_verify_enabled?: boolean
+  registration_email_suffix_whitelist?: string[]
   promo_code_enabled?: boolean
   password_reset_enabled?: boolean
   invitation_code_enabled?: boolean
@@ -99,6 +106,7 @@ export interface UpdateSettingsRequest {
   purchase_subscription_enabled?: boolean
   purchase_subscription_url?: string
   sora_client_enabled?: boolean
+  custom_menu_items?: CustomMenuItem[]
   smtp_host?: string
   smtp_port?: number
   smtp_username?: string
@@ -125,6 +133,7 @@ export interface UpdateSettingsRequest {
   ops_query_mode_default?: 'auto' | 'raw' | 'preagg' | string
   ops_metrics_interval_seconds?: number
   min_claude_code_version?: string
+  allow_ungrouped_key_scheduling?: boolean
 }
 
 /**
@@ -259,6 +268,84 @@ export async function updateStreamTimeoutSettings(
 ): Promise<StreamTimeoutSettings> {
   const { data } = await apiClient.put<StreamTimeoutSettings>(
     '/admin/settings/stream-timeout',
+    settings
+  )
+  return data
+}
+
+// ==================== Rectifier Settings ====================
+
+/**
+ * Rectifier settings interface
+ */
+export interface RectifierSettings {
+  enabled: boolean
+  thinking_signature_enabled: boolean
+  thinking_budget_enabled: boolean
+}
+
+/**
+ * Get rectifier settings
+ * @returns Rectifier settings
+ */
+export async function getRectifierSettings(): Promise<RectifierSettings> {
+  const { data } = await apiClient.get<RectifierSettings>('/admin/settings/rectifier')
+  return data
+}
+
+/**
+ * Update rectifier settings
+ * @param settings - Rectifier settings to update
+ * @returns Updated settings
+ */
+export async function updateRectifierSettings(
+  settings: RectifierSettings
+): Promise<RectifierSettings> {
+  const { data } = await apiClient.put<RectifierSettings>(
+    '/admin/settings/rectifier',
+    settings
+  )
+  return data
+}
+
+// ==================== Beta Policy Settings ====================
+
+/**
+ * Beta policy rule interface
+ */
+export interface BetaPolicyRule {
+  beta_token: string
+  action: 'pass' | 'filter' | 'block'
+  scope: 'all' | 'oauth' | 'apikey'
+  error_message?: string
+}
+
+/**
+ * Beta policy settings interface
+ */
+export interface BetaPolicySettings {
+  rules: BetaPolicyRule[]
+}
+
+/**
+ * Get beta policy settings
+ * @returns Beta policy settings
+ */
+export async function getBetaPolicySettings(): Promise<BetaPolicySettings> {
+  const { data } = await apiClient.get<BetaPolicySettings>('/admin/settings/beta-policy')
+  return data
+}
+
+/**
+ * Update beta policy settings
+ * @param settings - Beta policy settings to update
+ * @returns Updated settings
+ */
+export async function updateBetaPolicySettings(
+  settings: BetaPolicySettings
+): Promise<BetaPolicySettings> {
+  const { data } = await apiClient.put<BetaPolicySettings>(
+    '/admin/settings/beta-policy',
     settings
   )
   return data
@@ -410,6 +497,10 @@ export const settingsAPI = {
   deleteAdminApiKey,
   getStreamTimeoutSettings,
   updateStreamTimeoutSettings,
+  getRectifierSettings,
+  updateRectifierSettings,
+  getBetaPolicySettings,
+  updateBetaPolicySettings,
   getSoraS3Settings,
   updateSoraS3Settings,
   testSoraS3Connection,
