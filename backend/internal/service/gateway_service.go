@@ -6162,6 +6162,13 @@ func (s *GatewayService) shouldFailoverOn400(respBody []byte) bool {
 		return true
 	}
 
+	// 从账号导出配置中归纳出来的高频 400 兼容性/路由错误。
+	if strings.Contains(msg, "invalid_model_id") ||
+		strings.Contains(msg, "improperly formed request") ||
+		strings.Contains(msg, "text content blocks must be non-empty") {
+		return true
+	}
+
 	return false
 }
 
