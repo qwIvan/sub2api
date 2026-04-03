@@ -570,7 +570,7 @@ const ringItems = computed<RingItem[]>(() => {
       }
     }
     if (!data.subscription && data.balance != null) {
-      items.push({ title: t('keyUsage.walletBalance'), pct: 0, amount: usd(data.balance), isBalance: true, iconType: 'dollar' })
+      items.push({ title: t('keyUsage.walletBalance'), pct: 0, amount: cny(data.balance), isBalance: true, iconType: 'dollar' })
     }
   }
 
@@ -689,7 +689,7 @@ const detailRows = computed<DetailRow[]>(() => {
       : ''
     rows.push({
       iconBg: 'bg-emerald-500/10', iconColor: 'text-emerald-500', iconSvg: ICON_SHIELD,
-      label: t('keyUsage.remainingQuota'), value: data.remaining != null ? usd(data.remaining) : '-', valueClass: remainColor,
+      label: t('keyUsage.remainingQuota'), value: data.remaining != null ? cny(data.remaining) : '-', valueClass: remainColor,
     })
   }
 
@@ -736,6 +736,11 @@ const modelStats = computed<any[]>(() => resultData.value?.model_stats || [])
 function usd(value: number | null | undefined): string {
   if (value == null || value < 0) return '-'
   return '$' + Number(value).toFixed(2)
+}
+
+function cny(value: number | null | undefined): string {
+  if (value == null || value < 0) return '-'
+  return '¥' + Number(value).toFixed(2)
 }
 
 function fmtNum(val: number | null | undefined): string {
