@@ -2726,7 +2726,7 @@
             <div v-if="form.balance_low_notify_enabled">
               <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.settings.balanceNotify.threshold') }}</label>
               <div class="relative">
-                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">$</span>
+                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">¥</span>
                 <input v-model.number="form.balance_low_notify_threshold" type="number" min="0" step="0.01" class="input pl-7" />
               </div>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.balanceNotify.thresholdHint') }}</p>
