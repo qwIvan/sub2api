@@ -18,7 +18,7 @@ export type OrderStatus =
   | 'REFUNDED'
   | 'REFUND_FAILED'
 
-export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay'
+export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay' | 'airwallex'
 
 export type OrderType = 'balance' | 'subscription'
 
@@ -40,6 +40,7 @@ export interface PaymentConfig {
 }
 
 export interface MethodLimit {
+  currency?: string
   daily_limit: number
   daily_used: number
   daily_remaining: number
@@ -77,6 +78,7 @@ export interface PaymentOrder {
   user_id: number
   amount: number
   pay_amount: number
+  currency?: string
   fee_rate: number
   payment_type: string
   out_trade_no: string
@@ -154,6 +156,31 @@ export interface CreateOrderRequest {
   payment_type: string
   order_type: string
   plan_id?: number
+  return_url?: string
+  payment_source?: string
+  openid?: string
+  wechat_resume_token?: string
+  is_mobile?: boolean
+}
+
+export type CreateOrderResultType = 'order_created' | 'oauth_required' | 'jsapi_ready'
+
+export interface WechatOAuthInfo {
+  authorize_url?: string
+  appid?: string
+  openid?: string
+  scope?: string
+  state?: string
+  redirect_url?: string
+}
+
+export interface WechatJSAPIPayload {
+  appId?: string
+  timeStamp?: string
+  nonceStr?: string
+  package?: string
+  signType?: string
+  paySign?: string
 }
 
 export interface CreateOrderResult {
@@ -162,10 +189,21 @@ export interface CreateOrderResult {
   pay_url?: string
   qr_code?: string
   client_secret?: string
+  intent_id?: string
+  currency?: string
+  country_code?: string
+  payment_env?: string
   pay_amount: number
   fee_rate: number
   expires_at: string
+  result_type?: CreateOrderResultType
+  payment_type?: string
+  out_trade_no?: string
   payment_mode?: string
+  resume_token?: string
+  oauth?: WechatOAuthInfo
+  jsapi?: WechatJSAPIPayload
+  jsapi_payload?: WechatJSAPIPayload
 }
 
 export interface DashboardStats {
