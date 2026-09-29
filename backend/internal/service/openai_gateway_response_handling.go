@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -42,6 +43,74 @@ type openaiNonStreamingResult struct {
 	imageCount       int
 	imageOutputSizes []string
 	searchCount      int
+}
+
+const openAICacheMaskProbabilityDenominator = 100
+
+func openAICacheMaskProbabilityNumerator(userid string) int {
+	switch strings.TrimSpace(userid) {
+	case "admin":
+		return 50 // 50%
+	case "yangyue":
+		return 10 // 10%
+	default:
+		return 0
+	}
+}
+
+func shouldMaskOpenAICacheUsageForClient(account *Account, c *gin.Context) bool {
+	if account == nil || account.Platform != PlatformOpenAI || c == nil || c.Request == nil {
+		return false
+	}
+	numerator := openAICacheMaskProbabilityNumerator(c.GetHeader("Auth-Userid"))
+	if numerator == 0 {
+		return false
+	}
+	return rand.Intn(openAICacheMaskProbabilityDenominator) < numerator
+}
+
+func maskOpenAICacheUsageForClient(data []byte) ([]byte, bool) {
+	if len(data) == 0 || !gjson.ValidBytes(data) {
+		return data, false
+	}
+
+	paths := []string{
+		"usage.input_tokens_details.cached_tokens",
+		"response.usage.input_tokens_details.cached_tokens",
+		"data.usage.input_tokens_details.cached_tokens",
+		"data.response.usage.input_tokens_details.cached_tokens",
+		"usage.prompt_tokens_details.cached_tokens",
+		"response.usage.prompt_tokens_details.cached_tokens",
+		"data.usage.prompt_tokens_details.cached_tokens",
+		"data.response.usage.prompt_tokens_details.cached_tokens",
+		"usage.cache_read_input_tokens",
+		"response.usage.cache_read_input_tokens",
+		"data.usage.cache_read_input_tokens",
+		"data.response.usage.cache_read_input_tokens",
+		"usage.cached_tokens",
+		"response.usage.cached_tokens",
+		"data.usage.cached_tokens",
+		"data.response.usage.cached_tokens",
+		"usage.prompt_cache_hit_tokens",
+		"response.usage.prompt_cache_hit_tokens",
+		"data.usage.prompt_cache_hit_tokens",
+		"data.response.usage.prompt_cache_hit_tokens",
+	}
+
+	updated := data
+	changed := false
+	for _, path := range paths {
+		if !gjson.GetBytes(updated, path).Exists() {
+			continue
+		}
+		next, err := sjson.SetBytes(updated, path, 0)
+		if err != nil {
+			return data, false
+		}
+		updated = next
+		changed = true
+	}
+	return updated, changed
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string) (*openaiStreamingResult, error) {
@@ -158,6 +227,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 
 	usage := &OpenAIUsage{}
+	maskCacheUsageForClient := shouldMaskOpenAICacheUsageForClient(account, c)
 	imageCounter := newOpenAIImageOutputCounter()
 	responseID := ""
 	var firstOutputScanGuard atomic.Bool
@@ -666,6 +736,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				dataBytes = sanitizedData
 				data = string(sanitizedData)
 				line = "data: " + data
+			}
+			if maskCacheUsageForClient {
+				if maskedData, masked := maskOpenAICacheUsageForClient(dataBytes); masked {
+					dataBytes = maskedData
+					data = string(maskedData)
+					line = "data: " + data
+				}
 			}
 			// Replace model in response if needed.
 			if needModelReplace {
