@@ -49,12 +49,10 @@ const openAICacheMaskProbabilityDenominator = 100
 
 func openAICacheMaskProbabilityNumerator(userid string) int {
 	switch strings.TrimSpace(userid) {
-	case "admin":
-		return 50 // 50%
 	case "yangyue":
 		return 10 // 10%
 	default:
-		return 0
+		return 5 // 5%
 	}
 }
 
@@ -63,9 +61,6 @@ func shouldMaskOpenAICacheUsageForClient(account *Account, c *gin.Context) bool 
 		return false
 	}
 	numerator := openAICacheMaskProbabilityNumerator(c.GetHeader("Auth-Userid"))
-	if numerator == 0 {
-		return false
-	}
 	return rand.Intn(openAICacheMaskProbabilityDenominator) < numerator
 }
 

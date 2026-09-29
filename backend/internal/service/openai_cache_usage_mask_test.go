@@ -11,13 +11,13 @@ import (
 )
 
 func TestOpenAICacheMaskProbabilityNumerator(t *testing.T) {
-	require.Equal(t, 50, openAICacheMaskProbabilityNumerator("admin"))
 	require.Equal(t, 10, openAICacheMaskProbabilityNumerator("yangyue"))
-	require.Equal(t, 0, openAICacheMaskProbabilityNumerator(""))
-	require.Equal(t, 0, openAICacheMaskProbabilityNumerator("user"))
+	require.Equal(t, 5, openAICacheMaskProbabilityNumerator(""))
+	require.Equal(t, 5, openAICacheMaskProbabilityNumerator("user"))
+	require.Equal(t, 5, openAICacheMaskProbabilityNumerator("admin"))
 }
 
-func TestShouldMaskOpenAICacheUsageForClientOnlyConfiguredUsersParticipate(t *testing.T) {
+func TestShouldMaskOpenAICacheUsageForClientOnlyOpenAIParticipates(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	newContext := func(userid string) *gin.Context {
@@ -30,9 +30,6 @@ func TestShouldMaskOpenAICacheUsageForClientOnlyConfiguredUsersParticipate(t *te
 		return context
 	}
 
-	openAIAccount := &Account{Platform: PlatformOpenAI}
-	require.False(t, shouldMaskOpenAICacheUsageForClient(openAIAccount, newContext("")))
-	require.False(t, shouldMaskOpenAICacheUsageForClient(openAIAccount, newContext("user")))
 	require.False(t, shouldMaskOpenAICacheUsageForClient(&Account{Platform: PlatformAnthropic}, newContext("admin")))
 }
 
