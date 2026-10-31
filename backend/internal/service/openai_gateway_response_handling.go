@@ -49,7 +49,7 @@ const openAICacheMaskProbabilityDenominator = 100
 
 func openAICacheMaskProbabilityNumerator(userid string) int {
 	switch strings.TrimSpace(userid) {
-	case "yangyue":
+	case "yangyue", "yangxudong":
 		return 10 // 10%
 	default:
 		return 5 // 5%
